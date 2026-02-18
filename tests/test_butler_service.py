@@ -39,51 +39,33 @@ class FakeButler:
         self.calls.append((dataset_type, dataId))
         return {"data": dataId} if dataset_type == "raw" else FakeImage()
 
-    class registry:  # minimal interface for dataset type resolution
-        @staticmethod
-        def queryDatasetTypes(_pattern):
-            class _DT:
-                name = "preliminary_visit_image"
-
-            return [_DT()]
-
-
-class FakeButlerVisitImage(FakeButler):
-    class registry:
-        @staticmethod
-        def queryDatasetTypes(_pattern):
-            class _DT:
-                name = "visit_image"
-
-            return [_DT()]
-
 
 def test_factory_uses_provided_butler():
     butler = FakeButler()
-    svc = nt.cutouts_from_butler("dp1", butler=butler)
+    svc = nt.cutouts_from_butler("dp1", collections="test", butler=butler)
     assert isinstance(svc, nt.ButlerCutoutService)
 
 
-def test_visit_detector_cutout_calls_butler():
+def test_visit_detector_cutout_calls_butler_default_dataset_type():
     butler = FakeButler()
-    svc = nt.cutouts_from_butler("dp1", butler=butler)
+    svc = nt.cutouts_from_butler("dp1", collections="test", butler=butler)
 
     out = svc.cutout(visit=123, detector=9, radius=4)
 
     assert len(out) == 1
     assert out[0].token in {"root", "cutout"}
-    assert butler.calls == [("preliminary_visit_image", {"visit": 123, "detector": 9})]
+    assert butler.calls == [("visit_image", {"visit": 123, "detector": 9})]
 
 
 def test_sky_cutout_requires_resolver():
     butler = FakeButler()
-    svc = nt.cutouts_from_butler("dp1", butler=butler)
+    svc = nt.cutouts_from_butler("dp1", collections="test", butler=butler)
 
     with pytest.raises(NotImplementedError):
         svc.cutout(ra=10.0, dec=-1.0, radius=3)
 
 
-def test_sky_cutout_with_resolver():
+def test_sky_cutout_with_resolver_and_dataset_type_override():
     butler = FakeButler()
     resolver_calls = []
 
@@ -91,23 +73,16 @@ def test_sky_cutout_with_resolver():
         resolver_calls.append((ra, dec, time))
         return [{"visit": 1, "detector": 2}, {"visit": 1, "detector": 3}]
 
-    svc = nt.cutouts_from_butler("dp1", butler=butler, sky_resolver=resolver, dataset_type="raw")
-    out = svc.cutout(ra=1.2, dec=3.4, time="2025-01-01T00:00:00", radius=5)
+    svc = nt.cutouts_from_butler("dp1", collections="test", butler=butler, sky_resolver=resolver)
+    out = svc.cutout(ra=1.2, dec=3.4, time="2025-01-01T00:00:00", radius=5, dataset_type="raw")
 
     assert resolver_calls == [(1.2, 3.4, "2025-01-01T00:00:00")]
     assert out == [{"data": {"visit": 1, "detector": 2}}, {"data": {"visit": 1, "detector": 3}}]
 
 
-def test_dataset_type_falls_back_to_visit_image():
-    butler = FakeButlerVisitImage()
-    svc = nt.cutouts_from_butler("dp1", butler=butler)
-    svc.cutout(visit=11, detector=12, radius=4)
-    assert butler.calls == [("visit_image", {"visit": 11, "detector": 12})]
-
-
 def test_invalid_args():
     butler = FakeButler()
-    svc = nt.cutouts_from_butler("dp1", butler=butler)
+    svc = nt.cutouts_from_butler("dp1", collections="test", butler=butler)
 
     with pytest.raises(ValueError):
         svc.cutout(radius=2)

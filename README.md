@@ -1,23 +1,26 @@
 # neandertools
 
-`neandertools` provides a small API for generating image cutouts from Rubin Observatory LSST Butler repositories.
+`neandertools` provides a simple API for generating image cutouts from Rubin Observatory LSST Butler repositories.
 
 ## Quick start
 
 ```python
 import neandertools as nt
 
-svc = nt.cutouts_from_butler("~/lsst/dp1_subset")
+svc = nt.cutouts_from_butler(
+    "~/lsst/dp1_subset",
+    collections=["LSSTComCam/runs/DRP/DP1/DM-51335"],
+)
+
+# dataset_type defaults to "visit_image"
 images = svc.cutout(visit=2024110800253, detector=5, radius=100)
+
+# optional override
+images = svc.cutout(visit=2024110800253, detector=5, radius=100, dataset_type="preliminary_visit_image")
 ```
-
-For this repo, `dataset_type` is auto-selected as `visit_image`. If your repo has
-`preliminary_visit_image`, it will be selected automatically instead.
-
-By default, `cutout` returns a list of image-like objects returned by your Butler stack.
 
 ## Notes
 
-- This package keeps LSST imports optional and raises a clear error if the LSST stack is not installed.
-- The `visit+detector` cutout path is implemented and tested against `~/lsst/dp1_subset`.
-- The sky-coordinate mode (`ra/dec/time`) is wired, and needs a `sky_resolver` callback.
+- `collections` is required when creating the service.
+- `dataset_type` is selected per `cutout(...)` call and defaults to `"visit_image"`.
+- The sky-coordinate mode (`ra/dec/time`) is wired and needs a `sky_resolver` callback.
