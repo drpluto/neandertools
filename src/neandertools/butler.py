@@ -13,9 +13,25 @@ from lsst.sphgeom import LonLat, UnitVector3d
 
 
 class ButlerCutoutService:
-    """Generate cutouts from an LSST Butler repository."""
+    """Generate image cutouts from an LSST Butler repository.
+
+    This service fetches images by ``(visit, detector)`` data IDs and extracts
+    cutouts centered either in pixel coordinates (``x``, ``y``) or sky
+    coordinates (``ra``, ``dec`` converted through image WCS).
+
+    The extraction path supports optional edge padding so the requested center
+    remains at the center pixel of the returned cutout even near detector
+    boundaries.
+    """
 
     def __init__(self, butler: Any) -> None:
+        """Create a cutout service bound to a Butler instance.
+
+        Parameters
+        ----------
+        butler : object
+            Butler-like object providing ``get(dataset_type, dataId=...)``.
+        """
         self._butler = butler
         self._visit_detector_index_cache: dict[str, list[dict[str, Any]]] = {}
 
@@ -33,6 +49,39 @@ class ButlerCutoutService:
         detector: Optional[Union[int, Sequence[int]]] = None,
         pad: bool = True,
     ) -> list[Any]:
+        """Return one cutout per requested ``(visit, detector)`` pair.
+
+        Parameters
+        ----------
+        ra, dec : float or 1D sequence of float, optional
+            Sky center(s) in degrees. Must be provided together and used with
+            ``visit``/``detector``. Converted to pixel coordinates via image WCS.
+        x, y : float or 1D sequence of float, optional
+            Pixel center(s). Must be provided together and used with
+            ``visit``/``detector``.
+        h, w : int, optional
+            Requested cutout height and width in pixels. If omitted, defaults
+            to full image height/width.
+        dataset_type : str, optional
+            Butler dataset type to read. Defaults to ``"visit_image"``.
+        visit, detector : int or 1D sequence of int
+            Data IDs selecting source images. Both are required.
+        pad : bool, optional
+            If ``True`` (default), edge-overlapping requests are padded with
+            zeros so output shape remains ``(h, w)`` and the requested center
+            stays centered. If ``False``, requests are clipped to image bounds.
+
+        Returns
+        -------
+        list
+            List of extracted cutouts, one per broadcasted input row.
+
+        Raises
+        ------
+        ValueError
+            If argument combinations are invalid (for example missing paired
+            coordinates or missing ``visit``/``detector``).
+        """
         _validate_request(ra=ra, dec=dec, x=x, y=y, h=h, w=w, visit=visit, detector=detector)
         x_mode = _is_provided(x) or _is_provided(y)
         if x_mode:
@@ -81,7 +130,7 @@ class ButlerCutoutService:
         *,
         dataset_type: str = "visit_image",
     ) -> tuple[Any, Any]:
-        """Find (visit, detector) entries containing sky position at exposure time.
+        """Find matching ``(visit, detector)`` entries for sky position and time.
 
         Parameters
         ----------
@@ -91,6 +140,12 @@ class ButlerCutoutService:
             Query times. A match requires ``begin <= t < end``.
         dataset_type : str
             Dataset type used to build the visit/detector index.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            ``(visit, detector)`` arrays containing all matches across inputs,
+            flattened in input order.
         """
         import numpy as np
 
