@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from collections.abc import Sequence
 from datetime import datetime, timezone
+import multiprocessing as mp
+import os
 from typing import Any, Optional, Union
 
 from astropy.time import Time
@@ -24,15 +27,27 @@ class ButlerCutoutService:
     boundaries.
     """
 
-    def __init__(self, butler: Any) -> None:
+    def __init__(
+        self,
+        butler: Any,
+        *,
+        repo: Optional[str] = None,
+        collections: Optional[Union[str, Sequence[str]]] = None,
+    ) -> None:
         """Create a cutout service bound to a Butler instance.
 
         Parameters
         ----------
         butler : object
             Butler-like object providing ``get(dataset_type, dataId=...)``.
+        repo : str, optional
+            Butler repo root, stored for optional multiprocessing mode.
+        collections : str or sequence of str, optional
+            Butler collections, stored for optional multiprocessing mode.
         """
         self._butler = butler
+        self._repo = repo
+        self._collections = _normalize_collections(collections) if collections is not None else None
         self._visit_detector_index_cache: dict[str, list[dict[str, Any]]] = {}
 
     def cutout(
@@ -48,6 +63,7 @@ class ButlerCutoutService:
         visit: Optional[Union[int, Sequence[int]]] = None,
         detector: Optional[Union[int, Sequence[int]]] = None,
         pad: bool = True,
+        ncores: Optional[int] = None,
     ) -> list[Any]:
         """Return one cutout per requested ``(visit, detector)`` pair.
 
@@ -70,6 +86,10 @@ class ButlerCutoutService:
             If ``True`` (default), edge-overlapping requests are padded with
             ``NaN`` so output shape remains ``(h, w)`` and the requested center
             stays centered. If ``False``, requests are clipped to image bounds.
+        ncores : int, optional
+            Number of process cores used for extraction. If ``None``, choose
+            ``min(cpu_count, n_items)``. If ``1``, execute serially in the
+            current process. If ``>1``, use multiprocessing.
 
         Returns
         -------
@@ -83,6 +103,8 @@ class ButlerCutoutService:
             coordinates or missing ``visit``/``detector``).
         """
         _validate_request(ra=ra, dec=dec, x=x, y=y, h=h, w=w, visit=visit, detector=detector)
+        if ncores is not None and ncores < 1:
+            raise ValueError("ncores must be >= 1")
         x_mode = _is_provided(x) or _is_provided(y)
         if x_mode:
             x_values = _as_list(x, "x")
@@ -114,13 +136,58 @@ class ButlerCutoutService:
         ra_values = _broadcast_to(ra_values, n_items, "ra")
         dec_values = _broadcast_to(dec_values, n_items, "dec")
 
-        out = []
-        for v, d, xx, yy, rr, dd in zip(
-            visit_values, detector_values, x_values, y_values, ra_values, dec_values
-        ):
-            image = self._butler.get(dataset_type, dataId={"visit": int(v), "detector": int(d)})
-            out.append(self._extract_cutout(image, x=xx, y=yy, ra=rr, dec=dd, h=h, w=w, pad=pad))
-        return out
+        items = list(zip(visit_values, detector_values, x_values, y_values, ra_values, dec_values))
+        workers = _resolve_ncores(ncores, len(items))
+        if workers == 1:
+            return [
+                self._run_cutout_item(dataset_type=dataset_type, item=item, h=h, w=w, pad=pad)
+                for item in items
+            ]
+
+        if self._repo is None or self._collections is None:
+            raise ValueError(
+                "ncores>1 requires service with repo/collections metadata; "
+                "use cutouts_from_butler(...) to construct it."
+            )
+        try:
+            process_ctx = mp.get_context("fork")
+        except ValueError as e:
+            raise ValueError("multiprocessing with fork is not supported on this platform.") from e
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=process_ctx,
+                initializer=_init_process_cutout_worker,
+                initargs=(self._repo, self._collections),
+            ) as ex:
+                return list(
+                    ex.map(
+                        _process_cutout_worker,
+                        [(dataset_type, item, h, w, pad) for item in items],
+                    )
+                )
+        except (PermissionError, NotImplementedError):
+            # Restricted environments (e.g., sandboxed tests) may block process
+            # primitives. Fall back to serial execution.
+            return [
+                self._run_cutout_item(dataset_type=dataset_type, item=item, h=h, w=w, pad=pad)
+                for item in items
+            ]
+
+    def _run_cutout_item(
+        self,
+        *,
+        dataset_type: str,
+        item: tuple[Any, Any, Any, Any, Any, Any],
+        h: Optional[int],
+        w: Optional[int],
+        pad: bool,
+        butler: Optional[Any] = None,
+    ) -> Any:
+        v, d, xx, yy, rr, dd = item
+        read_butler = butler if butler is not None else self._butler
+        image = read_butler.get(dataset_type, dataId={"visit": int(v), "detector": int(d)})
+        return self._extract_cutout(image, x=xx, y=yy, ra=rr, dec=dd, h=h, w=w, pad=pad)
 
     def find_visit_detector(
         self,
@@ -371,7 +438,7 @@ def cutouts_from_butler(
 ) -> ButlerCutoutService:
     if butler is None:
         butler = Butler(repo, collections=collections)
-    return ButlerCutoutService(butler=butler)
+    return ButlerCutoutService(butler=butler, repo=repo, collections=collections)
 
 
 def _validate_request(
@@ -457,3 +524,36 @@ def _to_astropy_time(value: Union[datetime, str, Time]) -> Time:
             return Time(value, scale="tai")
         return Time(value)
     return Time(value, scale="tai")
+
+
+def _normalize_collections(collections: Union[str, Sequence[str]]) -> tuple[str, ...]:
+    if isinstance(collections, str):
+        return (collections,)
+    return tuple(str(c) for c in collections)
+
+
+def _resolve_ncores(ncores: Optional[int], n_items: int) -> int:
+    if ncores is None:
+        return max(1, min(os.cpu_count() or 1, n_items))
+    if ncores < 1:
+        raise ValueError("ncores must be >= 1")
+    return ncores
+
+
+_PROCESS_CUTOUT_SERVICE: Optional[ButlerCutoutService] = None
+
+
+def _init_process_cutout_worker(repo: str, collections: tuple[str, ...]) -> None:
+    global _PROCESS_CUTOUT_SERVICE
+    butler = Butler(repo, collections=list(collections))
+    _PROCESS_CUTOUT_SERVICE = ButlerCutoutService(butler=butler, repo=repo, collections=collections)
+
+
+def _process_cutout_worker(args: tuple[str, tuple[Any, Any, Any, Any, Any, Any], Any, Any, bool]) -> Any:
+    global _PROCESS_CUTOUT_SERVICE
+    if _PROCESS_CUTOUT_SERVICE is None:
+        raise RuntimeError("Process cutout worker service not initialized")
+    dataset_type, item, h, w, pad = args
+    return _PROCESS_CUTOUT_SERVICE._run_cutout_item(
+        dataset_type=dataset_type, item=item, h=h, w=w, pad=pad
+    )

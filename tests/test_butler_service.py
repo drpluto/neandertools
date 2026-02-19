@@ -293,6 +293,24 @@ def test_invalid_args():
     with pytest.raises(ValueError):
         svc.cutout(visit=[1, 2], detector=[3, 4, 5], ra=[10, 11], dec=[20, 21], h=5, w=5)
 
+    with pytest.raises(ValueError):
+        svc.cutout(visit=1, detector=2, ra=1, dec=2, h=5, w=5, ncores=0)
+
+
+def test_ncores_gt1_requires_repo_metadata():
+    butler = FakeButler()
+    svc = nt.ButlerCutoutService(butler=butler)
+    with pytest.raises(ValueError):
+        svc.cutout(
+            visit=123,
+            detector=9,
+            ra=12.3,
+            dec=-4.5,
+            h=11,
+            w=11,
+            ncores=2,
+        )
+
 
 def test_find_visit_detector_scalar_and_vector():
     np = pytest.importorskip("numpy")
