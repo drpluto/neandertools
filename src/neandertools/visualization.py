@@ -107,6 +107,7 @@ def cutouts_grid(
         figsize=(figsize_per_cell[0] * ncols, figsize_per_cell[1] * nrows),
         squeeze=False,
     )
+    cmap_obj = _cmap_with_black_nan(cmap)
 
     for i, arr in enumerate(arrays):
         r, c = divmod(i, ncols)
@@ -117,7 +118,7 @@ def cutouts_grid(
             origin="lower",
             vmin=vmins[i],
             vmax=vmaxs[i],
-            cmap=cmap,
+            cmap=cmap_obj,
             interpolation="nearest",
             extent=extents[i],
         )
@@ -169,7 +170,7 @@ def cutouts_gif(
     cmap: str = "gray",
     frame_duration_ms: int = 300,
     dpi: int = 100,
-    title_fontsize: float = 8.0,
+    title_fontsize: float = 12.0,
     show: bool = False,
 ) -> Path:
     """Save cutouts as an animated GIF.
@@ -210,12 +211,13 @@ def cutouts_gif(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig, ax = plt.subplots(1, 1, figsize=figsize, squeeze=True)
+    cmap_obj = _cmap_with_black_nan(cmap)
     im = ax.imshow(
         arrays[0],
         origin="lower",
         vmin=vmins[0],
         vmax=vmaxs[0],
-        cmap=cmap,
+        cmap=cmap_obj,
         interpolation="nearest",
         extent=extents[0],
     )
@@ -510,6 +512,12 @@ def _extract_metadata(obj: Any) -> dict[str, Any]:
     except Exception:
         pass
     return out
+
+
+def _cmap_with_black_nan(cmap: str) -> Any:
+    cmap_obj = plt.get_cmap(cmap).copy()
+    cmap_obj.set_bad("black")
+    return cmap_obj
 
 
 def _estimate_nonwarp_extent_and_ne(
